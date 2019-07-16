@@ -7,3 +7,6 @@
     
     Input: pandas dataframe, name entity column, name time column.
     '''
+
+def balancePanel():
+    pass
