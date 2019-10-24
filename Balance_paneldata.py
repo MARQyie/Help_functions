@@ -1,4 +1,4 @@
-# Balance panel
+ di# Balance panel
 ''' This function takes a pandas dataframe that is structured as a unbalanced
     panel and balances it. 
     
