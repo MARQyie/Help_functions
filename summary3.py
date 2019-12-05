@@ -240,7 +240,7 @@ class Summary(object):
     #  the output be distinguishable and more beautiful when printing. 
     #  Maybe there are other better ways.
 
-    def to_excel(self,path=None):
+    def to_excel(self,path=None,sheet_name = 'Sheet1',rename_index = None):
         tables = self.tables
         import  os
         cwd = os.getcwd()
@@ -249,7 +249,9 @@ class Summary(object):
         else:
             path = cwd + '\\summary_results.xlsx'
         summ_df = pd.concat(tables,axis=0)
-        return summ_df.to_excel(path)
+        if rename_index:
+            summ_df.rename(index = rename_index, inplace = True)
+        return summ_df.to_excel(path, sheet_name = sheet_name)
     def to_csv(self,path=None):
         tables = self.tables
         import  os
@@ -607,44 +609,6 @@ def _make_unique(list_of_names):
                 list_of_names[i] += '_%i' % c
     return list_of_names
 
-   #+9:
-   # The following function is the most critical to work.
-   # In this function  I added the parameters 'show' and 'title',
-   # and changed the default value of 'stars' into 'True',
-   # Then  I changed the dict parameter 'info_dict' as a list one named 'more_info'.
-   # Finally I put 'const'  at the first location by default in regressor_order.
-   #10+:
-   # Bug: np.unique() will disrupt the original order of list,
-   # this can result in index confusion.
-
-# def summary_col(results, float_format='%.4f', model_names=[], stars=False,
-#                 info_dict=None, regressor_order=[]): 
-    # """
-    # Summarize multiple results instances side-by-side (coefs and SEs)
-
-    # Parameters
-    # ----------
-    # results : statsmodels results instance or list of result instances
-    # float_format : string
-    #     float format for coefficients and standard errors
-    #     Default : '%.4f'
-    # model_names : list of strings of length len(results) if the names are not
-    #     unique, a roman number will be appended to all model names
-    # stars : bool
-    #     print significance stars
-    # info_dict : dict
-    #     dict of lambda functions to be applied to results instances to retrieve
-    #     model info. To use specific information for different models, add a
-    #     (nested) info_dict with model name as the key.
-    #     Example: `info_dict = {"N":..., "R2": ..., "OLS":{"R2":...}}` would
-    #     only show `R2` for OLS regression models, but additionally `N` for
-    #     all other results.
-    #     Default : None (use the info_dict specified in
-    #     result.default_model_infos, if this property exists)
-    # regressor_order : list of strings
-    #     list of names of the regressors in the desired order. All regressors
-    #     not specified will be appended to the end of the list.
-    # """
 
 def summary_col(results, float_format='%.4f', model_names=[], stars=True,
                 more_info=None, regressor_order=[],show='t',title=None): 
@@ -682,6 +646,7 @@ def summary_col(results, float_format='%.4f', model_names=[], stars=True,
 
     f = lambda idx: sum([[x + 'coef', x + 'stde'] for x in idx], [])
     # summ.index = f(np.unique(varnames))
+
     summ.index = f(pd.Series(varnames).unique())
     summ = summ.reindex(f(order))
     summ.index = [x[:-4] for x in summ.index]
