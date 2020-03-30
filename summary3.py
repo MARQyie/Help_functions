@@ -1,6 +1,7 @@
 from statsmodels.compat.python import (lrange, iterkeys, iteritems, lzip,
-                                       reduce, itervalues, zip, string_types,
-                                       range)
+                                       itervalues)
+from six import string_types
+from functools import reduce
 
 from collections import OrderedDict
 import datetime
