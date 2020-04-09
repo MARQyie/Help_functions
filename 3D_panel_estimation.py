@@ -24,16 +24,29 @@ class Metrics:
     
     def RSS(self):
         '''returns sum of squared errors (model vs actual)'''
-        squared_errors = (self.depvar - self.fittedvalues) ** 2
-        self.rss = np.sum(squared_errors)
-        return self.rss
+        if self._transform_data:
+            squared_errors = (self._depvar_trans - self.fittedvalues) ** 2
+            self.rss = np.sum(squared_errors)
+            return self.rss
+        
+        else:
+            squared_errors = (self._depvar - self.fittedvalues) ** 2
+            self.rss = np.sum(squared_errors)
+            return self.rss
         
     def TSS(self):
         '''returns total sum of squared errors (actual vs avg(actual))'''
-        avg_y = np.mean(self.depvar)
-        squared_errors = (self.depvar - avg_y) ** 2
-        self.tss = np.sum(squared_errors)
-        return self.tss
+        if self._transform_data:
+            avg_y = np.mean(self._depvar_trans)
+            squared_errors = (self._depvar_trans - avg_y) ** 2
+            self.tss = np.sum(squared_errors)
+            return self.tss
+        
+        else:
+            avg_y = np.mean(self._depvar)
+            squared_errors = (self._depvar - avg_y) ** 2
+            self.tss = np.sum(squared_errors)
+            return self.tss
     
     def rSquared(self):
         '''returns calculated value of r^2'''
@@ -47,18 +60,26 @@ class Metrics:
     
     def dfModel(self):
         ''' Calculates the model degrees of freedom.
-            rank(X) - intercept'''
-        if self.fit_intercept:
-            self.df_model = np.linalg.matrix_rank(self.data) - 1
+            rank(X).'''
+        # NOTE: self._data or self._data_trans never includes an intercept
+        if self._transform_data:
+            self.df_model = np.linalg.matrix_rank(self._data_trans)
+            return self.df_model
+        
         else:
-            self.df_model = np.linalg.matrix_rank(self.data)
-        return self.df_model
+            self.df_model = np.linalg.matrix_rank(self._data)
+            return self.df_model
             
     def dfResid(self):
         ''' Calculates the model degrees of freedom.
             N - rank(X)'''
-        self.df_resid = self.nobs - np.linalg.matrix_rank(self.data)
-        return self.df_resid
+        if self._transform_data:
+            self.df_resid = self.nobs - np.linalg.matrix_rank(self._data_trans)
+            return self.df_resid
+        
+        else:
+            self.df_resid = self.nobs - np.linalg.matrix_rank(self._data)
+            return self.df_resid
     
     def mseModel(self):
         """
@@ -122,15 +143,7 @@ class Metrics:
 #------------------------------------------------------------
 
 class Transformation:
-    
-    def __init__(self, y, X, FE_cols, how):
-        self._depvar = y.copy()
-        if X.ndim == 1:
-            X = pd.DataFrame(X)
-        self._data = X.copy()
-        self._FE_cols = FE_cols.copy()
-        self._how = how
-    
+
     def inventorizeFE(self):
         ''' Function to determine how to transform '''
         
@@ -241,6 +254,7 @@ class Transformation:
             return self
         elif self._FE.shape[1] == 3:
             raise RuntimeError('3FE does not work yet')
+            
         else:
             raise RuntimeError('Too many FE') 
     
@@ -249,8 +263,7 @@ class Transformation:
         self = self.dataTransformation()
                
         return (self._depvar_demeaned, self._data_demeaned)
-        
-    
+         
 #------------------------------------------------------------
 # Regression class and nested methods
 #------------------------------------------------------------
@@ -274,15 +287,23 @@ class MultiDimensionalOLS(Metrics, Transformation):
     # Calculate Residuals
     def residuals(self):
         ''' Returns vector of residuals '''
-        if self.fit_intercept:
-            if isinstance(self.data, pd.DataFrame):
-                data = self.data
-                data['cons'] = 1
-                self.resid = np.subtract(self.depvar, np.dot(data, self.params))
-            else:
-                self.resid = np.subtract(self.depvar, np.dot(np.c_[np.ones(self.data.shape[0]), self.data], self.params))
+        if self._transform_data:
+            data = self._data_trans.copy()
+            depvar = self._depvar_trans.copy()
+        
         else:
-            self.resid = np.subtract(self.depvar, np.dot(self.data, self.params))
+            data = self._data.copy()
+            depvar = self._depvar.copy()
+            
+        if self.fit_intercept:
+            if isinstance(self._data, pd.DataFrame):
+                data = self.intercept.join(data, how = 'outer')
+                self.resid = np.subtract(depvar, np.dot(data, self.params))
+            else:
+                self.resid = np.subtract(depvar, np.dot(np.c_[np.ones(data.shape[0]), data], self.params))
+        
+        else:
+            self.resid = np.subtract(depvar, np.dot(data, self.params))
         return self.resid
     
     # non-robust std function
@@ -309,10 +330,15 @@ class MultiDimensionalOLS(Metrics, Transformation):
             self.cluster_cols = pd.DataFrame(self.cluster_cols)
         
         # Set column labels to use
-        col_labels = self.data.columns
+        col_labels = self._data.columns
         
-        # Add residuals to data
-        data = self.data.join(self.resid, how = 'outer')
+        # Check whether data is transform and add residuals to data
+        if self._transform_data:
+            data = self._data_trans.copy()
+            data['resid'] = self.resid
+        else:
+            data = self._data.copy()
+            data['resid'] = self.resid
 
         # define methods that allows the parallel estimation of the clusters (Sum_g=1^G X'_g u_g u'_g Xg)
         num_cores = mp.cpu_count() # Get number of cores
@@ -331,7 +357,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
         if self.cluster_cols.shape[1] == 1.:
             # Add cluster columns to data and set index 
             data = data.join(self.cluster_cols, how = 'outer')
-            data.set_index(self.cluster_cols.columns[0], inplace = True)
+            data.set_index(pd.DataFrame(self.cluster_cols).columns[0], inplace = True)
             
             # Formula (see Cameron & Miller, 2015): (X'X)^-1 B (X'X)^-1
             # where B = Sum_g=1^G X'_g u_g u'_g Xg
@@ -398,8 +424,11 @@ class MultiDimensionalOLS(Metrics, Transformation):
     
     # TODO: cluster-bootstrap variance matrix (pp.327-328; Cameron & Miller, 2015)
     
+    def to_dataframe(self):
+        pass
+    
     # Calculate parameters, residuals, and standard deviation
-    def fit(self, y, X, fit_intercept = False, cov_type = 'nonrobust', cluster_cols = None):
+    def fit(self, y, X, fit_intercept = False, cov_type = 'nonrobust', cluster_cols = None, transform_data = False, FE_cols = None, how = None):
         ''' Calculates the parameters by OLS, and the residuals and 
             standard deviation of the parameters. The method allows for
             clustering of the standard errors; this only works with pandas.
@@ -413,6 +442,11 @@ class MultiDimensionalOLS(Metrics, Transformation):
         self.fit_intercept = fit_intercept
         self.cov_type = cov_type     
         self.cluster_cols = cluster_cols
+        self._FE_cols = FE_cols
+        self._how = how
+        self._depvar_trans = None
+        self._data_trans = None
+        self._transform_data = transform_data
         
         # Check whether instance is pandas and transform X to DataFrame if
         # it is a Series. If data is numpy, check dimensions of X, fit intercept
@@ -420,16 +454,36 @@ class MultiDimensionalOLS(Metrics, Transformation):
         if isinstance(y, pd.Series) and isinstance(X, pd.Series):
             X = pd.DataFrame(X)
             
-            self.depvar = y.copy()
-            self.data = X.copy()
+            self._depvar = y.copy()
+            self._data = X.copy()
             
+            if transform_data: # Transform the data
+                y_trans, X_trans = self.transform()
+                
+                if fit_intercept: # Fit intercept to data if necessary
+                    self.intercept = pd.DataFrame({'cons':np.ones(X_trans.shape[0])})
+                    X_trans = self.intercept.join(X_trans, how = 'outer')
+                
+                self._depvar_trans = y_trans.copy()
+                self._data_trans = X_trans.copy()
+                    
             if fit_intercept:
                 self.intercept = pd.DataFrame({'cons':np.ones(X.shape[0])})
                 X = self.intercept.join(X, how = 'outer')
                 
         elif isinstance(y, pd.Series) and isinstance(X, pd.DataFrame):
-            self.depvar = y.copy()
-            self.data = X.copy()
+            self._depvar = y.copy()
+            self._data = X.copy()
+            
+            if transform_data: # Transform the data
+                y_trans, X_trans = self.transform()
+                
+                if fit_intercept: # Fit intercept to data if necessary
+                    self.intercept = pd.DataFrame({'cons':np.ones(X_trans.shape[0])})
+                    X_trans = self.intercept.join(X_trans, how = 'outer')
+                
+                self._depvar_trans = y_trans.copy()
+                self._data_trans = X_trans.copy()
             
             if fit_intercept:
                 self.intercept = pd.DataFrame({'cons':np.ones(X.shape[0])})
@@ -439,8 +493,8 @@ class MultiDimensionalOLS(Metrics, Transformation):
             if X.ndim == 1:
                 X = X.reshape(-1,1)
             
-            self.depvar = y.copy()
-            self.data = X.copy()
+            self._depvar = y.copy()
+            self._data = X.copy()
             
             if fit_intercept:
                 self.intercept = np.ones(X.shape[0])
@@ -453,24 +507,34 @@ class MultiDimensionalOLS(Metrics, Transformation):
             raise TypeError('Type should be numpy.ndarray, pandas.Series, or pandas.DataFrame')
 
         # Check column rank of X
-        if np.linalg.matrix_rank(X) != X.shape[1]:
-            raise RuntimeError("X does not have full column rank")
+        if transform_data:
+            if np.linalg.matrix_rank(X_trans) != X_trans.shape[1]:
+                raise RuntimeError("Transformed X does not have full column rank")
+        else:
+            if np.linalg.matrix_rank(X) != X.shape[1]:
+                raise RuntimeError("X does not have full column rank")
             
         # Get N and K from X
         self.nobs, self.nvars = X.shape
         
         # Calculate parameters with OLS and set attribute
         # TODO FGLS
-        xtx = np.dot(X.T,X)
-        xtx_inv = np.linalg.inv(xtx)
-        xty = np.dot(X.T,y)
-        params = np.dot(xtx_inv, xty)
+        if transform_data:
+            xtx = np.dot(X_trans.T,X_trans)
+            xtx_inv = np.linalg.inv(xtx)
+            xty = np.dot(X_trans.T,y_trans)
+            params = np.dot(xtx_inv, xty)
+        else:
+            xtx = np.dot(X.T,X)
+            xtx_inv = np.linalg.inv(xtx)
+            xty = np.dot(X.T,y)
+            params = np.dot(xtx_inv, xty)
         
         self.params = params
         
         # Calculate the residuals
         #self.resid = np.subtract(y, np.dot(X, params))
-        self.residuals()
+        self.resid = self.residuals()
         
         # Calculate standard deviation
         if cov_type == 'nonrobust':
@@ -480,7 +544,10 @@ class MultiDimensionalOLS(Metrics, Transformation):
             self.clusteredSTD()
 
         # Add metrics
-        self.fittedvalues = self.predict(X)
+        if transform_data:
+            self.fittedvalues = self.predict(X_trans)
+        else:
+            self.fittedvalues = self.predict(X)
         self.rss = self.RSS()
         self.tss = self.TSS()
         self.ess = self.tss - self.rss        
