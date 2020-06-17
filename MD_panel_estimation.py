@@ -16,6 +16,7 @@ import pandas as pd
 from scipy import stats
 import multiprocessing as mp # For parallelization
 from joblib import Parallel, delayed # For parallelization
+from sklearn.utils import resample
 
 #------------------------------------------------------------
 # Metrics Class (Calculates metrics after estimation)
@@ -49,7 +50,7 @@ class Metrics:
             return self.tss
     
     def rSquared(self):
-        '''returns calculated value of r^2'''
+        '''returns calculated value of the (centered) r^2'''
         self.rsquared = 1 - self.rss / self.tss
         return self.rsquared
     
@@ -168,9 +169,6 @@ class Transformation:
         ''' Creates the correct FE columns. If there are any combinations of 
         FE the method creates a new column '''
         
-        # Run inventorizeFE
-        self = self.inventorizeFE()
-        
         # Check whether there is only one FE and whether that has a combination
         if not self._multFE:
             if self._boolCombFE: # has a FE combination               
@@ -217,10 +215,7 @@ class Transformation:
     def dataTransformation(self):
         ''' Transforms that data '''
         # NOTE does not work on three FE yet
-        
-        # Call FEColumns
-        self = self.FEColumns()
-        
+  
         # Make df with _dep_var and _data
         df = pd.concat([self._depvar, self._data], axis = 1)
         
@@ -253,13 +248,31 @@ class Transformation:
             
             return self
         elif self._FE.shape[1] == 3:
-            raise RuntimeError('3FE does not work yet')
+            # Get the means of the df
+            df_mean_fe1 = df.groupby(self._FE.iloc[:,0]).transform('mean')
+            df_mean_fe2 = df.groupby(self._FE.iloc[:,1]).transform('mean')
+            df_mean_fe3 = df.groupby(self._FE.iloc[:,2]).transform('mean')
+            df_mean = df.mean()
+            
+            # Demean the df
+            df_demeaned = df - df_mean_fe1 - df_mean_fe2 - df_mean_fe3 + 2 * df_mean
+            
+            # Add _dep_var_demeaned and _data_demeaned to self and return
+            self._depvar_demeaned = df_demeaned.iloc[:,0]
+            self._data_demeaned = df_demeaned.iloc[:,1:]
             
         else:
             raise RuntimeError('Too many FE') 
     
     def transform(self):
         ''' Returns transformed data as df '''
+        # Run inventorizeFE
+        self = self.inventorizeFE()
+                     
+        # Call FEColumns
+        self = self.FEColumns()
+        
+        #Run dataTransformation
         self = self.dataTransformation()
                
         return (self._depvar_demeaned, self._data_demeaned)
@@ -283,6 +296,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
         self.std = None
         self.resid = None
         self.cov_type = None
+        self._name = 'Code_docs.Help_functions.MD_panel_estimation'
     
     # Calculate Residuals
     def residuals(self):
@@ -307,18 +321,24 @@ class MultiDimensionalOLS(Metrics, Transformation):
         return self.resid
     
     # non-robust std function
-    def nonRobustSTD(self, xtx_inv):
+    def nonRobustSTD(self):
         ''' Returns non-robust standard errors of the parameters.
             
             std = sqrt(SSR/(N - K)); see Wooldridge p.60
         '''
         resid_sqr = np.power(self.resid, 2)
         sigma = np.divide(np.sum(resid_sqr), (self.nobs - self.nvars))
+        if self._transform_data:
+            xtx = np.dot(self._data_trans.T,self._data_trans)
+            xtx_inv = np.linalg.inv(xtx)
+        else:
+            xtx = np.dot(self._data.T,self._data)
+            xtx_inv = np.linalg.inv(xtx)
         cov_matrix = np.dot(sigma, xtx_inv)
         self.std = np.sqrt(np.diag(cov_matrix))
         return self.std
     
-    def clusteredSTD(self):
+    def clusteredSTD(self, wild = False):
         ''' Returns an array of clustered standard errors based on the columns 
             given. '''
             
@@ -328,26 +348,39 @@ class MultiDimensionalOLS(Metrics, Transformation):
         # if cluster_cols is a pandas.Series, make pandas.DataFrame
         if isinstance(self.cluster_cols, pd.Series):
             self.cluster_cols = pd.DataFrame(self.cluster_cols)
-        
+               
         # Set column labels to use
         col_labels = self._data.columns
         
-        # Check whether data is transform and add residuals to data
+        # Check whether data is transformed and add residuals to data
+        # NOTE: we adjust the residuals for the number of clusters. 
+        # TODO: Adjustments for 2 clusters might not be correct
+        if self.cluster_cols.shape[1] == 1.:
+            G = float(self.cluster_cols.nunique())
+            
+        elif self.cluster_cols.shape[1] == 2.:
+            G = float(self.cluster_cols.nunique().sum())
+            
+        else:
+            raise RuntimeError('Does not support clustering on more than two levels')
+        c = np.sqrt(G / (G - 1))        
+        
         if self._transform_data:
             data = self._data_trans.copy()
-            data['resid'] = self.resid
+            if wild:
+                data['resid'] = self._resid_wild * c
+            else:
+                data['resid'] = self.resid * c
         else:
             data = self._data.copy()
-            data['resid'] = self.resid
+            if wild:
+                data['resid'] = self._resid_wild * c
+            else:
+                data['resid'] = self.resid * c
 
-        # define methods that allows the parallel estimation of the clusters (Sum_g=1^G X'_g u_g u'_g Xg)
+        # define methods that allows for parallel estimation of the clusters (Sum_g=1^G X'_g u_g u'_g Xg)
         num_cores = mp.cpu_count() # Get number of cores
         
-        def applyParallel(dfGrouped, func):
-            ''' First runs the function parallel '''
-            retLst = Parallel(n_jobs = num_cores)(delayed(func)(group) for name, group in dfGrouped)
-            return retLst
-
         def clusterErrors(df, resid, col_names):
             df_vars = df[col_names]
             df_resid = pd.DataFrame(df[resid])
@@ -368,7 +401,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
             ## Calculate the clustered errors
             data_grouped = data.groupby(data.index)
             
-            if __name__ == '__main__':
+            if __name__ == '__main__' or __name__ == self._name:
                 error_matrices = Parallel(n_jobs = num_cores)(delayed(clusterErrors)(group, 'resid', col_labels) for name, group in data_grouped)
             
             ## Sum the matrices elementwise
@@ -388,8 +421,12 @@ class MultiDimensionalOLS(Metrics, Transformation):
             # Set index
             data.set_index(unique_groups.columns, inplace = True)
             
+            ## Calculate the inverse XX matrix
+            xtx = np.dot(data[col_labels].T, data[col_labels])
+            xtx_inv = np.linalg.inv(xtx)
+            
             # Estimate the variance matrix for each unique group
-            if __name__ == '__main__':
+            if __name__ == '__main__' or __name__ == self._name:
                 error_matrices_group1 = Parallel(n_jobs = num_cores)(delayed(clusterErrors)(group, 'resid', col_labels) for name, group in data.groupby(data.index.get_level_values(0)))
                 error_matrices_group2 = Parallel(n_jobs = num_cores)(delayed(clusterErrors)(group, 'resid', col_labels) for name, group in data.groupby(data.index.get_level_values(1)))
                 error_matrices_group12 = Parallel(n_jobs = num_cores)(delayed(clusterErrors)(group, 'resid', col_labels) for name, group in data.groupby(data.index.get_level_values(2)))
@@ -422,13 +459,228 @@ class MultiDimensionalOLS(Metrics, Transformation):
         self.std = np.sqrt(np.diag(cov_matrix))
         return self.std
     
-    # TODO: cluster-bootstrap variance matrix (pp.327-328; Cameron & Miller, 2015)
-    
-    def to_dataframe(self):
+    def clusterErrorsBootstrap(self, B = 1000):
+        ''' Uses a boostrap procedure to estimate a cluster robust variance matrix.
+            Returns the std (srqt of the diag of the var matrix). See: (pp.327-328; Cameron & Miller, 2015) '''
+        
+        # if cluster_cols is a pandas.Series, make pandas.DataFrame
+        if isinstance(self.cluster_cols, pd.Series):
+            self.cluster_cols = pd.DataFrame(self.cluster_cols)
+            
+        # Set the correct data
+        if self._transform_data:
+            depvar = self._depvar_trans.copy()
+            data = self._data_trans.copy()
+        else:
+            depvar = self._depvar.copy()
+            data = self._data.copy()
+        
+        # Define the bootstrap method
+        def resampleProcedure(data):
+            data_r = resample(data)
+            return data_r
+        
+        def ProcedureCEB(y_grouped, X_grouped):
+            
+            # Resample data
+            y_r = y_grouped.apply(resampleProcedure)
+            X_r = X_grouped.apply(resampleProcedure)
+            
+            # Calculate beta_b and return
+            xtx = np.dot(X_r.T,X_r)
+            xtx_inv = np.linalg.inv(xtx)
+            xty = np.dot(X_r.T,y_r)
+            beta_b = np.dot(xtx_inv, xty)  
+            
+            return beta_b
+        
+        if self.cluster_cols.shape[1] == 1.:
+            # Set index
+            depvar = depvar.join(self.cluster_cols, how = 'outer')
+            depvar.set_index(pd.DataFrame(self.cluster_cols).columns[0], inplace = True)
+            
+            data = data.join(self.cluster_cols, how = 'outer')
+            data.set_index(pd.DataFrame(self.cluster_cols).columns[0], inplace = True)
+            
+            # Group data
+            depvar_grouped = depvar.groupby(depvar.index)
+            data_grouped = data.groupby(depvar.index)
+            
+            # Run bootstrap
+            num_cores = mp.cpu_count()
+            
+            if __name__ == '__main__' or __name__ == self._name:
+                beta_b = Parallel(n_jobs = num_cores, prefer = 'threads')(delayed(ProcedureCEB)(depvar_grouped, data_grouped) for i in range(B))
+            
+            # Calculate variance matrix
+            ## Calculate beta_b_bar
+            beta_b_bar = (1 / B) * np.sum(beta_b, axis = 0)
+            
+            ## Calculate cov_matrix
+            cov_matrix = (1 / (B - 1)) * np.sum([(b - beta_b_bar) @ (b - beta_b_bar).T for b in beta_b], axis = 0)
+                        
+            # Calculate std
+            self.std = np.sqrt(np.diag(cov_matrix))
+            
+            return self.std
+            
+        elif self.cluster_cols.shape[1] == 2.:
+            raise RuntimeError('Two-levels is not implemented yet for bootstrap variance estimation')
+            
+        else:
+            raise RuntimeError('Does not support clustering on more than two levels')    
+          
+    def clusterErrorsJackknife(self):
+        # TODO
         pass
     
+    def wildClusterBootstrap(self, B = 1000, alpha = 0.05, weights = 'Rademacher'):
+        ''' Returns refined test statistics (pp.344-345; Cameron & Miller, 2015) ''' 
+
+        # Prelim
+        if self._transform_data:
+            y = self._depvar_trans.copy()
+            X = self._data_trans.copy()
+        else:
+            y = self._depvar.copy()
+            X = self._data.copy()
+            
+        # Step 1: setup
+        ## Set Wald t-stat
+        wald = self.tStat()
+        
+        ## Regress y on restricted X for each param left out
+        def restrictedEstimations(y, X, col_name):
+            ### Get restricted X
+            X_res = X.drop(columns = col_name)
+            
+            ### regress y on X_res
+            xtx = np.dot(X_res.T,X_res)
+            xtx_inv = np.linalg.inv(xtx)
+            xty = np.dot(X_res.T,y)
+            beta_res = np.dot(xtx_inv, xty)
+            
+            ### calculate residuals
+            u_res = np.subtract(y, np.dot(X_res, beta_res))
+
+            return X_res, beta_res, u_res
+        
+        ### Run the method parallel
+        num_cores = mp.cpu_count()
+        col_names = X.columns.to_numpy()
+        
+        if __name__ == '__main__' or __name__ == self._name:
+            X_res, beta_res, u_res = zip(*Parallel(n_jobs = num_cores, prefer = 'threads')(delayed(restrictedEstimations)(y, X, col) for col in col_names))
+        
+        # Step 2: Bootstrap procedure
+        ## Set up the procedure
+        def bootstrapProcedureWild(self, y, x, x_res, beta_res, resids_grouped):           
+            ### Form new residuals
+            if weights == 'Rademacher':
+                resids_as = resids_grouped.apply(lambda x: x * np.random.choice([-1,1], p = [0.5, 0.5]))
+            elif weights == 'Mammen':
+                p = (np.sqrt(5) + 1) / (2 * np.sqrt(5))
+                resids_as = resids_grouped.apply(lambda x: x * np.random.choice([(1 - np.sqrt(5)) / 2, (1 + np.sqrt(5)) / 2], p = [p, 1 - p]))
+                
+            ### Calculate y_asterisk (y_as)
+            y_as = x_res @ beta_res + resids_as
+            
+            ### Regress y_as on X (unrestricted)
+            xtx = np.dot(x.T,x)
+            xtx_inv = np.linalg.inv(xtx)
+            xty = np.dot(x.T,y_as)
+            beta_as = np.dot(xtx_inv, xty)        
+            
+            ### Calculate residuals (not adjusted) and attatch to self
+            resid_as = y - x @ beta_as
+            self._resid_wild = resid_as
+            
+            ### Compute standard deviations (std_as)
+            std_as = self.clusteredSTD(wild = True)
+            
+            ### Compute Wald statistic (wald_as)    
+            wald_as = beta_as / std_as
+            
+            return wald_as
+        
+        ## Loop over all variables
+        ### Prelims
+        wald_as_list = []
+        
+        for var, par, resids in zip(X_res, beta_res, u_res):
+            ### Group the sample on clusters
+            resids_grouped = resids.groupby(self.cluster_cols.iloc[:,0])
+                        
+            ## Enter loop B = 1000
+            if __name__ == '__main__' or __name__ == self._name:
+                wald_as = Parallel(n_jobs = num_cores, prefer = 'threads')(delayed(bootstrapProcedureWild)(self, y, X, var, par, resids_grouped) for i in range(B))
+            
+            wald_as_list.append(wald_as)
+            
+        # Step 3: Reject Wald statistics
+        wild_wald = []
+        
+        for test_list in wald_as_list:
+            ## Calculate the quantiles
+            lower, upper = np.quantile(test_list, [alpha / 2, 1 - alpha / 2])
+            if wald < lower or wald > upper:
+                wild_wald.append(1)
+            else:
+                wild_wald.append(0)
+        
+        # Add wild_wald to self and return
+        self.wild_wald = wild_wald
+        
+        return self
+        
+    def to_dataframe(self):
+        ''' Returns a pandas DataFrame containing the estimates, stds, 
+            tstats, pvals and, if available, wild_wald '''
+        index = self._data.columns.to_numpy() 
+        columns = ['params', 'std', 't', 'p', 'nobs', 'adj_rsquared' ,'depvar_notrans_mean' ,'depvar_notrans_median', 'depvar_notrans_std','fixed effects']
+        nobs_col = [self.nobs] + [np.nan] * (index.shape[0] - 1)
+        r2_col = [self.adj_rsquared] + [np.nan] * (index.shape[0] - 1)
+        if self._transform_data:
+            depvar_mean_col = [np.exp(self._depvar_trans.mean() - 1)] + [np.nan] * (index.shape[0] - 1)
+            depvar_median_col = [np.exp(self._depvar_trans.median() - 1)] + [np.nan] * (index.shape[0] - 1)
+            depvar_std_col = [np.exp(self._depvar_trans.std())] + [np.nan] * (index.shape[0] - 1)
+        else:
+            depvar_mean_col = [np.exp(self._depvar.mean() - 1)] + [np.nan] * (index.shape[0] - 1)
+            depvar_median_col = [np.exp(self._depvar.median() - 1)] + [np.nan] * (index.shape[0] - 1)
+            depvar_std_col = [np.exp(self._depvar.std())] + [np.nan] * (index.shape[0] - 1)
+        if not(self._FE_cols is None):
+            if self._FE_cols.shape[1] == 3:
+                fixed_effects = ['MSA-Year \& Lender'] + [np.nan] * (index.shape[0] - 1)
+            elif self._FE_cols.shape[1] == 2:
+                fixed_effects = ['Year \& Lender'] + [np.nan] * (index.shape[0] - 1)
+            else:
+                fixed_effects = ['Lender'] + [np.nan] * (index.shape[0] - 1)
+        else:
+            fixed_effects = [np.nan] + [np.nan] * (index.shape[0] - 1)
+        
+        data = np.array([self.params, self.std, self.tstat, self.pval, nobs_col, r2_col, depvar_mean_col, depvar_median_col, depvar_std_col, fixed_effects]).T
+        
+        # Add the bootstrap results if available
+        if self._bootstrap_residuals:
+            columns.append('wild_waldstat')
+            data.append(self.wild_wald)
+        
+        # Make pandas dataframe
+        df = pd.DataFrame(data = data, index = index, columns = columns)        
+        
+        return df
+    
+    def OLSestimator(self, y, X):
+        ''' Returns params with OLS estimation '''
+        xtx = np.dot(X.T,X)
+        xtx_inv = np.linalg.inv(xtx)
+        xty = np.dot(X.T,y)
+        params = np.dot(xtx_inv, xty)
+        
+        return params
+    
     # Calculate parameters, residuals, and standard deviation
-    def fit(self, y, X, fit_intercept = False, cov_type = 'nonrobust', cluster_cols = None, transform_data = False, FE_cols = None, how = None):
+    def fit(self, y, X, fit_intercept = False, cov_type = 'nonrobust', cluster_cols = None, bootstrap_residuals = False, B = 1000, alpha = 0.05, weights = 'Rademacher', transform_data = False, FE_cols = None, how = None):
         ''' Calculates the parameters by OLS, and the residuals and 
             standard deviation of the parameters. The method allows for
             clustering of the standard errors; this only works with pandas.
@@ -447,6 +699,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
         self._depvar_trans = None
         self._data_trans = None
         self._transform_data = transform_data
+        self._bootstrap_residuals = bootstrap_residuals
         
         # Check whether instance is pandas and transform X to DataFrame if
         # it is a Series. If data is numpy, check dimensions of X, fit intercept
@@ -467,7 +720,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
                 self._depvar_trans = y_trans.copy()
                 self._data_trans = X_trans.copy()
                     
-            if fit_intercept:
+            elif not transform_data and fit_intercept:
                 self.intercept = pd.DataFrame({'cons':np.ones(X.shape[0])})
                 X = self.intercept.join(X, how = 'outer')
                 
@@ -485,7 +738,7 @@ class MultiDimensionalOLS(Metrics, Transformation):
                 self._depvar_trans = y_trans.copy()
                 self._data_trans = X_trans.copy()
             
-            if fit_intercept:
+            elif not transform_data and fit_intercept:
                 self.intercept = pd.DataFrame({'cons':np.ones(X.shape[0])})
                 X = self.intercept.join(X, how = 'outer')
                 
@@ -520,17 +773,9 @@ class MultiDimensionalOLS(Metrics, Transformation):
         # Calculate parameters with OLS and set attribute
         # TODO FGLS
         if transform_data:
-            xtx = np.dot(X_trans.T,X_trans)
-            xtx_inv = np.linalg.inv(xtx)
-            xty = np.dot(X_trans.T,y_trans)
-            params = np.dot(xtx_inv, xty)
+            self.params = self.OLSestimator(self._depvar_trans, self._data_trans)
         else:
-            xtx = np.dot(X.T,X)
-            xtx_inv = np.linalg.inv(xtx)
-            xty = np.dot(X.T,y)
-            params = np.dot(xtx_inv, xty)
-        
-        self.params = params
+            self.params = self.OLSestimator(self._depvar, self._data)
         
         # Calculate the residuals
         #self.resid = np.subtract(y, np.dot(X, params))
@@ -538,11 +783,13 @@ class MultiDimensionalOLS(Metrics, Transformation):
         
         # Calculate standard deviation
         if cov_type == 'nonrobust':
-            self.nonRobustSTD(xtx_inv)
+            self.nonRobustSTD()
             
         elif cov_type == 'clustered':
             self.clusteredSTD()
-
+            if self._bootstrap_residuals:
+                self.wild_wald = self.wildClusterBootstrap(B = B, alpha = alpha, weights = weights)
+        
         # Add metrics
         if transform_data:
             self.fittedvalues = self.predict(X_trans)
@@ -582,5 +829,40 @@ class MultiDimensionalOLS(Metrics, Transformation):
             X = pd.DataFrame(X)
         return np.dot(X, self.params) 
 
+#------------------------------------------------------------
+# Test
+#------------------------------------------------------------
 
+'''
+#Load packages
+import os
+#os.chdir(r'/data/p285325/WP2_distance/')
+os.chdir(r'D:/RUG/PhD/Materials_papers/2-Working_paper_competition')
+
+# Load data and drop na
+df = pd.read_csv('Data/data_agg_clean.csv')
+df.dropna(inplace = True)
+
+# Set y and X
+## Y
+y = df['log_min_distance'] 
+
+## X
+x_list = ['ls_num', 'lti', 'ln_loanamout', 'ln_appincome', 'subprime', \
+               'cb', 'ln_ta', 'ln_emp', 'num_branch', 'ln_pop', 'density', 'hhi', 'ln_mfi'] #secured is only 1
+x = df[x_list]
+
+# Get the estimates
+## Run model
+results = MultiDimensionalOLS().fit(y, x, cov_type = 'clustered', cluster_cols = df.msamd, transform_data = True, FE_cols = df[['msamd','date','cert']], how = 'msamd x date, cert')
+results_pooled = MultiDimensionalOLS().fit(y, x, cov_type = 'clustered', cluster_cols = df.msamd)
+
+## Save to df and write to csv file and excel
+df_results = results.to_dataframe()
+df_results_pooled = results_pooled.to_dataframe()
+
+path = r'D:/RUG/PhD/Materials_papers/2-Working_paper_competition/Results/'
+df_results.to_excel(path + 'Results_mainmodel.xlsx')
+df_results_pooled.to_excel(path + 'Results_pooledmodel.xlsx')
+'''
             
